@@ -1,0 +1,4 @@
+laser_scan_topic: "/front/scan"
+point_cloud_topic: "/pointcloud"
+target_frame_id: ""
+change_frame: false
