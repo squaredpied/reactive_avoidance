@@ -50,14 +50,29 @@ typedef struct LidarPointSim {  //     Start     End     Size
 } __attribute__((
     packed));  // important! we want same memory alignment as in the message
 
+
+typedef struct LidarPointSimJackal {  //     Start     End     Size
+  float x;                      //        0       3         4
+  float y;                      //        4       7         4
+  float z;                      //        8       11        4
+  float intensity;              //        12      15        4
+  uint32_t index;                //       15      18        4
+
+  __device__ inline Eigen::Vector3f ray() { return {x, y, z}; }
+  __device__ inline float ray_length() { return ray().norm(); }
+} __attribute__((
+    packed));  // important! we want same memory alignment as in the message
+
 // Should be solved nicer in the future.
 #ifdef USE_OUSTER_LIDAR
   typedef LidarPointOuster LidarPoint;
+#elif USE_JACKAL_LASER
+  typedef LidarPointSimJackal LidarPoint;
 #else
   typedef LidarPointSim LidarPoint;
 #endif
 
-
+#ifdef USE_OUSTER_LIDAR
 __global__ void raycastKernel(
     const Eigen::Vector3f vel, const uint8_t* lidar_data,
     size_t lidar_data_n_points, Eigen::Matrix3f* metric_sum,
@@ -170,6 +185,121 @@ __global__ void raycastKernel(
     policy_debug_data[blockId] = sum_debugdata;
   }
 }
+
+#else
+  __global__ void raycastKernel(
+    const Eigen::Vector3f vel, const uint8_t* lidar_data,
+    size_t lidar_data_n_points, Eigen::Matrix3f* metric_sum,
+    Eigen::Vector3f* metric_x_force_sum, float maximum_ray_length,
+    const RaycastingCudaPolicyParameters parameters, bool output_debug,
+    rmpcpp::LidarRayDebugData* output_values,
+    rmpcpp::LidarPolicyDebugData* policy_debug_data) {
+  /** Shared memory to sum the components of an RMP */
+  using Vector = Eigen::Vector3f;
+  using Matrix = Eigen::Matrix3f;
+
+  /** Thread ids */
+  const unsigned int idx = threadIdx.x + blockIdx.x * blockDim.x;
+  const unsigned int dimx = gridDim.x * blockDim.x;
+  const unsigned int idy = threadIdx.y + blockIdx.y * blockDim.y;
+  const unsigned int dimy = gridDim.y * blockDim.y;
+  const unsigned int id = idx + idy * dimx;
+
+  LidarPoint* point = (LidarPoint*)lidar_data;
+
+  float ray_length = point[id].ray_length();
+  output_values[id].topRows<3>(0) = point[id].ray();
+  Eigen::Vector3f ray = point[id].ray().normalized();
+
+  Matrix A_obst, A;
+  Vector metric_x_force;
+
+  rmpcpp::LidarPolicyDebugData policy_data;
+
+  if (ray_length >= maximum_ray_length || id >= lidar_data_n_points ||
+      ray_length <= 0.2) {
+    // (here we simply also filter out some of the obvious outliers.
+    // Exact numbers might depend on lidar model though.)
+
+    /** No obstacle hit: return */
+    A = Matrix::Zero();
+    metric_x_force = Vector::Zero();
+    policy_data = rmpcpp::LidarPolicyDebugData::Zero();
+
+    output_values[id](3) = 0.0;
+    output_values[id](4) = 0.0;
+    output_values[id](5) = 0.0;
+    output_values[id](6) = 0.0;
+    output_values[id](7) = 0.0;
+  } else {
+    /** Simple RMP obstacle policy */
+    Vector f_rep = alpha_rep(ray_length, parameters.eta_rep, parameters.v_rep,
+                             parameters.lin_rep) *
+                   -ray;
+    Vector f_damp = -alpha_damp(ray_length, parameters.eta_damp,
+                                parameters.v_damp, parameters.epsilon_damp) *
+                    max(0.0, float(-vel.transpose() * -ray)) *
+                    (-ray * -ray.transpose()) * vel;
+    Vector f_obst = f_rep + f_damp;
+    Vector f_norm = softnorm(f_obst, parameters.c_softmax_obstacle);
+
+    if (parameters.metric) {
+      A_obst = w(ray_length, parameters.r) * f_norm * f_norm.transpose();
+    } else {
+      A_obst = w(ray_length, parameters.r) * Matrix::Identity();
+    }
+
+    A = A_obst;
+    Vector f = f_obst;
+    metric_x_force = A * f;
+
+    policy_data.col(0) = f_rep;
+    policy_data.col(1) = f_norm;
+    policy_data.col(2) = A * f_rep;
+    policy_data.col(3) = A * f_norm;
+
+    output_values[id](3) = f.norm();
+    output_values[id](4) = A.norm();
+    output_values[id](5) = metric_x_force.norm();
+    output_values[id](6) = f_damp.norm();
+    output_values[id](7) = f_rep.norm();
+  }
+
+  const int blockId = blockIdx.x + blockIdx.y * gridDim.x;
+
+  /** Reduction within CUDA block: Start with metric reduction */
+  using BlockReduceMatrix =
+      typename cub::BlockReduce<Matrix, BLOCKSIZE, cub::BLOCK_REDUCE_RAKING,
+                                BLOCKSIZE>;
+  __shared__ typename BlockReduceMatrix::TempStorage temp_storage_matrix;
+  Matrix sum_matrices0 = BlockReduceMatrix(temp_storage_matrix)
+                             .Sum(A);  // Sum calculated on thread 0
+
+  /** Metric x force reduction */
+  using BlockReduceVector =
+      typename cub::BlockReduce<Vector, BLOCKSIZE, cub::BLOCK_REDUCE_RAKING,
+                                BLOCKSIZE>;
+  __shared__ typename BlockReduceVector::TempStorage temp_storage_vector;
+  Vector sum_vectors0 =
+      BlockReduceVector(temp_storage_vector).Sum(metric_x_force);
+
+  /** Reduction within CUDA block: Start with metric reduction */
+  using BlockReduceDebugData =
+      typename cub::BlockReduce<rmpcpp::LidarPolicyDebugData, BLOCKSIZE,
+                                cub::BLOCK_REDUCE_RAKING, BLOCKSIZE>;
+  __shared__ typename BlockReduceDebugData::TempStorage temp_storage_debug_data;
+  rmpcpp::LidarPolicyDebugData sum_debugdata =
+      BlockReduceDebugData(temp_storage_debug_data)
+          .Sum(policy_data);  // Sum calculated on thread 0
+
+  __syncthreads();
+  if (threadIdx.x == 0 && threadIdx.y == 0) {
+    metric_x_force_sum[blockId] = sum_vectors0;
+    metric_sum[blockId] = sum_matrices0;
+    policy_debug_data[blockId] = sum_debugdata;
+  }
+}
+#endif
 /********************************************************************/
 
 template <class Space>

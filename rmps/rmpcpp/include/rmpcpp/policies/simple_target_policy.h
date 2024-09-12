@@ -54,6 +54,10 @@ class SimpleTargetPolicy : public PolicyBase<NormSpace> {
   virtual PValue evaluateAt(const PState &state) {
     Vector f = alpha_ * s(this->space_.minus(target_, state.pos_)) -
                beta_ * state.vel_;
+    if (this->space_.norm(this->space_.minus(target_, state.pos_))< 0.2)
+    {
+      f = Vector::Zero();
+    }
     return {f, this->A_static_};
   }
 

@@ -17,7 +17,7 @@ LidarCloudNode::LidarCloudNode()
 
   ray_policy_ = std::make_shared<RayPolicy>(params);
   target_policy_ = std::make_shared<TargetPolicy>(
-      Eigen::Vector3d(1.0, 1.0, 1.0),
+      Eigen::Vector3d(0.0, 0.0, 0.0),
       Eigen::Matrix3d::Identity() * params.metric_goal, params.alpha_goal,
       params.beta_goal, params.gamma_goal);
 

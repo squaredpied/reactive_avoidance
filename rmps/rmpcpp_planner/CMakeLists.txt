@@ -14,7 +14,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_CXX_FLAGS " -Wall -Wextra")
 set(CMAKE_BUILD_TYPE Release)
 
-add_compile_definitions(USE_OUSTER_LIDAR) # turn off to use sim lidar datastructure
+add_compile_definitions(USE_JACKAL_LASER) # turn off to use sim lidar datastructure
 # see file "lidarray_CUDA.cu" for pointcloud definitions.
 
 #####################################
