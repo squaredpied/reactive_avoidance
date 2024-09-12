@@ -1,0 +1,34 @@
+<launch>
+     <!-- Launch laser scan to point cloud node -->
+     <arg name="gui" default="false" />
+     
+     <node name="laser_scan_to_point_cloud" pkg="rmp_barn_challenge" type="laser_scan_to_point_cloud_node" output="screen">
+        <rosparam command="load" file="$(find rmp_barn_challenge)/config/lpc.yaml"/>
+     </node>
+ 
+     <!-- Launch trajectory to twist converter node -->
+     <node name="traj2twist" pkg="rmp_barn_challenge" type="traj2twist.py" output="screen"/>
+
+
+    <!-- Launch the RMP planner -->
+    <node pkg="rmpcpp_planner" name="rmpcpp_planner_lidarnode" type="rmpcpp_planner_lidarnode" clear_params="true">
+        <param name="r" value = "1.4" />
+		<param name="c_softmax_obstacle" value="1.0" />
+		<param name="epsilon_damp" value ="0.001" />
+        <param name="eta_damp" value="12" />
+        <param name="v_damp" value="1" />
+        <param name="eta_rep" value ="1.2" />
+        <param name="v_rep" value= "1.4" />
+		<param name="alpha_goal" value="30.0" />
+		<param name="beta_goal" value="30.0" />
+        <remap from="points" to="/pointcloud" />
+        <remap from="odometry" to="/odometry/filtered" />
+        <remap from="trajectory" to="/jackal/command/trajectory" />
+    </node>
+
+    <arg name="rviz_config_file" default="/jackal_ws/src/the-barn-challenge/def.rviz"/>
+    
+    <node if="$(arg gui)" pkg="rviz" name="rviz" type="rviz" args="-d $(arg rviz_config_file)"/>
+
+  
+</launch>
